@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Pie Countdown Timer (SVG)</title>
+<style>
+  :root{
+    --size: 260px;
+    --bg: #f3f4f6;
+    --circle-bg: #e6e6e6;
+    --fill-color: #4f46e5;
+    --text-color: #111827;
+  }
+  body{
+    font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    height:100vh;
+    margin:0;
+    background:var(--bg);
+  }
+  .timer {
+    width:var(--size);
+    text-align:center;
+  }
+  .time-label{
+    font-size:2rem;
+    font-weight:600;
+    color:var(--text-color);
+    margin-bottom:0.6rem;
+  }
+  .controls {
+    margin-top:0.8rem;
+    display:flex;
+    gap:0.5rem;
+    justify-content:center;
+    align-items:center;
+  }
+  button, input[type="number"]{
+    font-size:1rem;
+    padding:0.45rem 0.7rem;
+    border-radius:8px;
+    border:1px solid rgba(0,0,0,0.08);
+    background:white;
+  }
+  button:active{ transform:translateY(1px); }
+  .meta {
+    margin-top:0.45rem;
+    color:#6b7280;
+    font-size:0.9rem;
+  }
+  /* Make SVG responsive */
+  svg { display:block; margin:0 auto; max-width:100%; height:auto; }
+</style>
+</head>
+<body>
+
+<div class="timer" role="application" aria-label="Visual countdown timer">
+  <div id="timeLabel" class="time-label">00:00</div>
+
+  <!-- SVG container: we draw a background circle and a 'sector' path on top -->
+  <svg id="pieSVG" viewBox="0 0 200 200" width="260" height="260" aria-hidden="false" role="img">
+    <!-- background circle (track) -->
+    <circle cx="100" cy="100" r="90" fill="#ffffff" />
+    <circle cx="100" cy="100" r="90" fill="none" stroke="#e6e6e6" stroke-width="20" />
+
+    <!-- filled sector (the "remaining time" pie slice) -->
+    <!-- We'll update the "d" attribute of this path as time passes -->
+    <path id="sectorPath" fill="var(--fill-color)" stroke="none" d="" />
+
+    <!-- inner circle to create a donut look (optional) -->
+    <circle cx="100" cy="100" r="55" fill="white" />
+    
+    <!-- small center label (percentage) -->
+    <text id="percentLabel" x="100" y="106" text-anchor="middle" font-size="18" font-weight="700" fill="#111827"></text>
+  </svg>
+
+  <div class="controls">
+    <button id="startBtn">Start</button>
+    <button id="pauseBtn">Pause</button>
+    <button id="resetBtn">Reset</button>
+    <input id="minutesInput" type="number" min="0" max="999" value="1" title="Minutes" aria-label="minutes" style="width:66px">
+  </div>
+
+  <div class="meta">Minutes: <strong><span id="minutesDisplay">1</span></strong> — change and press Reset</div>
+</div>
+
+<script>
+/*
+  Simple SVG pie-sector countdown.
+  - The sector path shows TIME REMAINING as a pie slice (from 12 o'clock, clockwise).
+  - We compute the arc path every update and set it to the path element's "d" attribute.
+*/
+
+const totalSecondsDefault = 60; // default fallback
+let totalSeconds = 60;
+let startTimestamp = null;
+let paused = true;
+let pausedRemaining = null;
+let timerId = null;
+
+const timeLabel = document.getElementById('timeLabel');
+const sectorPath = document.getElementById('sectorPath');
+const percentLabel = document.getElementById('percentLabel');
+const minutesInput = document.getElementById('minutesInput');
+const minutesDisplay = document.getElementById('minutesDisplay');
+
+document.getElementById('startBtn').addEventListener('click', () => {
+  if (paused) startTimer();
+});
+document.getElementById('pauseBtn').addEventListener('click', () => {
+  pauseTimer();
+});
+document.getElementById('resetBtn').addEventListener('click', () => {
+  resetTimer();
+});
+
+minutesInput.addEventListener('change', () => {
+  const val = parseInt(minutesInput.value, 10) || 0;
+  minutesDisplay.textContent = val;
+});
+
+// Helper: convert seconds to MM:SS
+function formatTime(seconds){
+  seconds = Math.max(0, Math.round(seconds));
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  const mm = String(m).padStart(2,'0');
+  const ss = String(s).padStart(2,'0');
+  return `${mm}:${ss}`;
+}
+
+// SVG path generator for a sector (pie slice).
+// center (cx,cy), radius r, startAngle and endAngle in degrees.
+// angles measured clockwise; 0deg at positive X axis. We'll offset -90deg to start at 12 o'clock.
+function describeSector(cx, cy, r, startAngleDeg, endAngleDeg){
+  // normalize
+  const startRad = (Math.PI/180) * startAngleDeg;
+  const endRad = (Math.PI/180) * endAngleDeg;
+
+  const x1 = cx + r * Math.cos(startRad);
+  const y1 = cy + r * Math.sin(startRad);
+  const x2 = cx + r * Math.cos(endRad);
+  const y2 = cy + r * Math.sin(endRad);
+
+  // Determine if the arc should be large ( > 180deg )
+  let delta = endAngleDeg - startAngleDeg;
+  if (delta < 0) delta += 360;
+  const largeArcFlag = delta > 180 ? 1 : 0;
+
+  // If the sector is the whole circle, return a full circle path.
+  if (Math.abs(delta - 360) < 0.0001) {
+    // Draw a full circle by two half-arcs (SVG arc commands can't draw a complete circle in one arc)
+    return [
+      `M ${cx + r} ${cy}`,
+      `A ${r} ${r} 0 1 1 ${cx - r} ${cy}`,
+      `A ${r} ${r} 0 1 1 ${cx + r} ${cy}`,
+      `Z`
+    ].join(' ');
+  }
+
+  // Move to center, line to start, arc to end, close back to center
+  return [
+    `M ${cx} ${cy}`,
+    `L ${x1} ${y1}`,
+    `A ${r} ${r} 0 ${largeArcFlag} 1 ${x2} ${y2}`,
+    `Z`
+  ].join(' ');
+}
+
+// Draw the sector corresponding to 'remaining' seconds out of 'total'
+function drawPie(remaining, total){
+  // clamp
+  remaining = Math.max(0, Math.min(remaining, total));
+  const fraction = total === 0 ? 0 : (remaining / total);
+  const degrees = fraction * 360;
+
+  // start angle = -90deg (12 o'clock). end angle = start + degrees (clockwise)
+  const start = -90;
+  const end = start + degrees;
+
+  // If remaining is zero, clear the path to make the pie empty
+  if (remaining <= 0) {
+    sectorPath.setAttribute('d', '');
+    percentLabel.textContent = '0%';
+    return;
+  }
+
+  // If full circle, draw full
+  const d = describeSector(100, 100, 90, start, end);
+  sectorPath.setAttribute('d', d);
+
+  const pct = Math.round(fraction * 100);
+  percentLabel.textContent = pct + '%';
+}
+
+// Timer control functions
+function startTimer(){
+  if (!paused){
+    return;
+  }
+  // If pausedRemaining is set, resume from that; otherwise start fresh based on minutes input
+  if (pausedRemaining != null){
+    // resume
+    totalSeconds = totalSeconds; // unchanged
+    startTimestamp = performance.now();
+    endTime = startTimestamp + pausedRemaining * 1000;
+    paused = false;
+    runLoop(endTime);
+  } else {
+    const minutes = Math.max(0, parseInt(minutesInput.value,10) || 0);
+    totalSeconds = Math.max(0, Math.round(minutes * 60));
+    // default small value if user left 0
+    if (totalSeconds === 0) totalSeconds = totalSecondsDefault;
+
+    startTimestamp = performance.now();
+    const endTime = startTimestamp + totalSeconds * 1000;
+    paused = false;
+    pausedRemaining = null;
+    runLoop(endTime);
+  }
+}
+
+function pauseTimer(){
+  if (paused) return;
+  paused = true;
+  if (timerId) cancelAnimationFrame(timerId);
+  // compute remaining seconds at pause
+  const now = performance.now();
+  pausedRemaining = Math.max(0, (endTime - now) / 1000);
+}
+
+function resetTimer(){
+  // stop loop
+  paused = true;
+  if (timerId) cancelAnimationFrame(timerId);
+  pausedRemaining = null;
+  const minutes = Math.max(0, parseInt(minutesInput.value,10) || 0);
+  totalSeconds = Math.max(0, Math.round(minutes * 60));
+  if (totalSeconds === 0) totalSeconds = totalSecondsDefault;
+  // draw full pie
+  drawPie(totalSeconds, totalSeconds);
+  timeLabel.textContent = formatTime(totalSeconds);
+}
+
+// This function runs via requestAnimationFrame for smoother updates
+let endTime = null;
+function runLoop(targetTime){
+  endTime = targetTime;
+  function tick(){
+    if (paused) return;
+    const now = performance.now();
+    const remainingMs = Math.max(0, endTime - now);
+    const remainingSec = remainingMs / 1000;
+
+    // update UI
+    timeLabel.textContent = formatTime(remainingSec);
+    drawPie(remainingSec, totalSeconds);
+
+    // stop when finished
+    if (remainingMs <= 20) {
+      // done
+      timeLabel.textContent = formatTime(0);
+      drawPie(0, totalSeconds);
+      paused = true;
+      pausedRemaining = 0;
+      return;
+    }
+
+    // schedule next frame
+    timerId = requestAnimationFrame(tick);
+  }
+  // start first tick
+  timerId = requestAnimationFrame(tick);
+}
+
+// Initialize UI
+(function init(){
+  minutesDisplay.textContent = minutesInput.value;
+  const minutes = Math.max(0, parseInt(minutesInput.value,10) || 0);
+  totalSeconds = Math.max(0, Math.round(minutes * 60));
+  if (totalSeconds === 0) totalSeconds = totalSecondsDefault;
+  drawPie(totalSeconds, totalSeconds);
+  timeLabel.textContent = formatTime(totalSeconds);
+})();
+</script>
+
+</body>
+</html>
